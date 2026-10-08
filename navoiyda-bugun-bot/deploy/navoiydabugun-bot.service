@@ -1,0 +1,13 @@
+[Unit]
+Description=Navoiyda Bugun Telegram bot
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/navoiyda-bugun-bot
+EnvironmentFile=/opt/navoiyda-bugun-bot/.env
+ExecStart=/opt/navoiyda-bugun-bot/.venv/bin/python -m app.bot.main
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
