@@ -104,9 +104,15 @@ def _resolve_profile(format_name: str | None) -> DeadlineProfile:
 
 
 def _aware(dt: datetime) -> datetime:
+    """Naive → Tashkent deb olinadi; aware → Tashkentga keltiriladi.
+
+    Syomka KUNI `pdt.date()` dan olinadi — boshqa zonadagi aware vaqt
+    (masalan UTC 20:00 = Tashkent ertasi 01:00) to'g'ridan-to'g'ri
+    ishlatilsa syomka kuni bir kunga surilib ketardi.
+    """
     if dt.tzinfo is None:
         return dt.replace(tzinfo=TASHKENT_TZ)
-    return dt
+    return dt.astimezone(TASHKENT_TZ)
 
 
 @dataclass
