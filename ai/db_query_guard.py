@@ -21,6 +21,50 @@ MAX_RESPONSE_CHARS = 100_000
 _SQL_OK = re.compile(r"^(select|with)\b", re.IGNORECASE)
 
 
+_DOLLAR_TAG = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+
+
+def _is_escape_string_start(sql: str, i: int) -> bool:
+    """`E'...'` (yoki `e'...'`) — PostgreSQL escape-string literali boshlanishimi.
+
+    Bunday literal ichida `\\'` tirnoqni yopmaydi; oddiy `'...'` ichida esa
+    teskari chiziq oddiy belgi (standard_conforming_strings=on).
+    """
+    if i == 0 or sql[i - 1] not in ("E", "e"):
+        return False
+    # `E` dan oldin identifikator belgisi bo'lsa — bu prefiks emas (masalan `name'`).
+    return i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] == "_")
+
+
+def _skip_literal(sql: str, i: int, out: list[str] | None) -> int:
+    """`sql[i]` ochuvchi tirnoq. Literal yopilgandan KEYINGI indeksni qaytaradi.
+
+    Qamrov: `'...'` (ikkilangan `''` qochirish bilan), `"..."` identifikator,
+    `E'...'` (teskari chiziq qochirish bilan). Yopilmagan literal — ValueError.
+    `out` berilsa literal o'zgarishsiz unga ko'chiriladi.
+    """
+    quote = sql[i]
+    escapes = quote == "'" and _is_escape_string_start(sql, i)
+    n = len(sql)
+    j = i + 1
+    while j < n:
+        ch = sql[j]
+        if escapes and ch == "\\" and j + 1 < n:
+            j += 2
+            continue
+        if ch == quote:
+            if j + 1 < n and sql[j + 1] == quote:
+                # Ikkilangan tirnoq — literal ichidagi qochirish, yopilish EMAS.
+                j += 2
+                continue
+            if out is not None:
+                out.append(sql[i : j + 1])
+            return j + 1
+        j += 1
+    # Yopilmagan literal — «tuzatib» yubormaymiz, rad etamiz.
+    raise ValueError("Unterminated string literal in SQL")
+
+
 def _strip_sql_comments(sql: str) -> str:
     """Izohlarni olib tashlaydi, LEKIN satr-literallarga TEGMAYDI.
 
@@ -31,32 +75,24 @@ def _strip_sql_comments(sql: str) -> str:
     bajarilardi. Endi bir marta yurib, literal holatini kuzatamiz.
 
     Qamrov: bitta qo'shtirnoqli literal (ikkilangan qochirish bilan),
-    qo'shtirnoqli identifikator, qatorli izoh, blok izoh. Dollar-quoting
-    (`$$...$$`) `_SQL_OK` filtridan o'tmaydi (faqat SELECT/WITH), shuning
-    uchun bu yerda ataylab qo'llanmaydi — noma'lum qismni «xavfsiz» deb
-    ko'rsatgandan ko'ra rad etish yaxshi.
+    `E'...'` escape-literal (teskari chiziq qochirish bilan), qo'shtirnoqli
+    identifikator, qatorli izoh, blok izoh.
+
+    Dollar-quoting (`$$...$$`, `$tag$...$tag$`) ATAYLAB rad etiladi: u
+    `SELECT` dan KEYIN ham kelishi mumkin, va ichidagi bitta `'` skanerni
+    «literal ichidaman» deb aldab, orqasidan kelgan `; DELETE ...` ni
+    yashirar edi. Noma'lum qismni «xavfsiz» deb ko'rsatgandan ko'ra rad
+    etish yaxshi.
     """
     out: list[str] = []
     i, n = 0, len(sql)
-    quote: str | None = None
     while i < n:
         ch = sql[i]
-        if quote:
-            out.append(ch)
-            if ch == quote:
-                # Ikkilangan tirnoq — literal ichidagi qochirish, yopilish EMAS.
-                if i + 1 < n and sql[i + 1] == quote:
-                    out.append(sql[i + 1])
-                    i += 2
-                    continue
-                quote = None
-            i += 1
-            continue
         if ch in ("'", '"'):
-            quote = ch
-            out.append(ch)
-            i += 1
+            i = _skip_literal(sql, i, out)
             continue
+        if ch == "$" and _DOLLAR_TAG.match(sql, i):
+            raise ValueError("Dollar-quoted strings are not allowed")
         if ch == "-" and sql.startswith("--", i):
             j = sql.find("\n", i)
             i = n if j == -1 else j
@@ -69,9 +105,6 @@ def _strip_sql_comments(sql: str) -> str:
             continue
         out.append(ch)
         i += 1
-    if quote:
-        # Yopilmagan literal — «tuzatib» yubormaymiz, rad etamiz.
-        raise ValueError("Unterminated string literal in SQL")
     return "".join(out)
 
 
@@ -79,23 +112,17 @@ def _has_statement_separator(sql: str) -> bool:
     """Literaldan TASHQARIDA nuqtali vergul bormi.
 
     `SELECT ';' AS x` haqli so'rov — sodda tekshiruv uni «Only ONE statement»
-    deb rad etardi (soxta rad).
+    deb rad etardi (soxta rad). Literal-skaner `_strip_sql_comments` bilan
+    BIR XIL (`_skip_literal`) — ikki skaner bir-biridan farq qilsa, biri
+    «ichkarida» deb o'ylagan joyni ikkinchisi «tashqarida» deb o'qiydi.
     """
-    quote: str | None = None
     i, n = 0, len(sql)
     while i < n:
         ch = sql[i]
-        if quote:
-            if ch == quote:
-                if i + 1 < n and sql[i + 1] == quote:
-                    i += 2
-                    continue
-                quote = None
-            i += 1
-            continue
         if ch in ("'", '"'):
-            quote = ch
-        elif ch == ";":
+            i = _skip_literal(sql, i, None)
+            continue
+        if ch == ";":
             return True
         i += 1
     return False
